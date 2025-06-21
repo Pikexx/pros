@@ -1,0 +1,111 @@
+#!/bin/bash
+
+MUSIC_DIR="/home/env/Music"
+shuffle=false
+loop=false
+current_song=""
+player_pid=""
+loop_pid=""
+
+declare -A SONG_MAP
+
+toggle_bool() {
+  if $1; then echo false; else echo true; fi
+}
+
+build_song_list() {
+  SONG_MAP=()
+  while IFS= read -r path; do
+    name=$(basename "${path%.*}")
+    SONG_MAP["$name"]="$path"
+  done < <(find "$MUSIC_DIR" -type f \( -iname "*.mp3" -o -iname "*.flac" -o -iname "*.wav" -o -iname "*.ogg" \))
+
+  SONG_LIST=("${!SONG_MAP[@]}")
+
+  if $shuffle; then
+    SONG_LIST=($(printf "%s\n" "${SONG_LIST[@]}" | shuf))
+  else
+    IFS=$'\n' SONG_LIST=($(printf "%s\n" "${SONG_LIST[@]}" | sort))
+  fi
+}
+
+kill_players() {
+  [[ -n $player_pid ]] && kill "$player_pid" 2>/dev/null
+  [[ -n $loop_pid ]] && kill "$loop_pid" 2>/dev/null
+  wait "$player_pid" 2>/dev/null
+  wait "$loop_pid" 2>/dev/null
+  player_pid=""
+  loop_pid=""
+}
+
+play_song_once() {
+  local track=$1
+  mpv --no-video --really-quiet --force-window=no --player-operation-mode=pseudo-gui \
+      --idle=no --loop-file=no --no-terminal "$track" >/dev/null 2>&1 &
+  player_pid=$!
+}
+
+play_song_loop() {
+  local track=$1
+  while true; do
+    mpv --no-video --really-quiet --force-window=no --player-operation-mode=pseudo-gui \
+        --idle=no --loop-file=no --no-terminal "$track" >/dev/null 2>&1
+  done
+}
+
+while true; do
+  build_song_list
+
+  loop_status="Loop: $( $loop && echo 'ON' || echo 'OFF' )"
+  shuffle_status="Shuffle: $( $shuffle && echo 'ON' || echo 'OFF' )"
+  SONG_LIST+=(":pause" ":loop ($loop_status)" ":shuffle ($shuffle_status)" ":stop" ":quit")
+
+  selection=$(printf "%s\n" "${SONG_LIST[@]}" | fzf --height 40% --border --prompt="♪ ")
+
+  [[ -z $selection ]] && kill_players && exit 0
+
+  case "$selection" in
+    ":pause")
+      playerctl play-pause >/dev/null 2>&1 || true
+      ;;
+    ":loop "*)
+      loop=$(toggle_bool $loop)
+      if $loop; then
+        # If loop turned ON and a song is playing, start loop player
+        if [[ -n $current_song ]]; then
+          kill_players
+          loop_pid=""
+          play_song_loop "$current_song" &
+          loop_pid=$!
+        fi
+      else
+        # Loop turned OFF, kill loop player and play song once
+        if [[ -n $current_song ]]; then
+          kill_players
+          play_song_once "$current_song"
+        fi
+      fi
+      ;;
+    ":shuffle "*)
+      shuffle=$(toggle_bool $shuffle)
+      ;;
+    ":stop")
+      kill_players
+      ;;
+    ":quit")
+      kill_players
+      exit 0
+      ;;
+    *)
+      # Kill any playing songs
+      kill_players
+      current_song="${SONG_MAP[$selection]}"
+      if $loop; then
+        play_song_loop "$current_song" &
+        loop_pid=$!
+      else
+        play_song_once "$current_song"
+      fi
+      ;;
+  esac
+done
